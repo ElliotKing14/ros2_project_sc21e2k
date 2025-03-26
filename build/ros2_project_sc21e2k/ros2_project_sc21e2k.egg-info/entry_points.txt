@@ -1,0 +1,3 @@
+[console_scripts]
+first_step = ros2_project_sc21e2k.first_step:main
+

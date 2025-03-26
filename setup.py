@@ -21,9 +21,9 @@ setup(
     entry_points={
         'console_scripts': [
             'first_step = ros2_project_sc21e2k.first_step:main',
-            'second_step = ros2_project_sc21e2k.second_step:main',
-            'third_step = ros2_project_sc21e2k.third_step:main',
-            'fourth_step = ros2_project_sc21e2k.fourth_step:main',
+            # 'second_step = ros2_project_sc21e2k.second_step:main',
+            # 'third_step = ros2_project_sc21e2k.third_step:main',
+            # 'fourth_step = ros2_project_sc21e2k.fourth_step:main',
         ],
     },
 )

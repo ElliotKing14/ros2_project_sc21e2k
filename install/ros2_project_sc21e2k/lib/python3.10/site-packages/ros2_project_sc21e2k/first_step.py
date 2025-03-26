@@ -22,14 +22,12 @@ from math import sin, cos
 class colourIdentifier(Node):
     def __init__(self):
         super().__init__('cI')
-        self.get_logger().info("ColourIdentifier node initialized.")
         self.subscription = self.create_subscription(Image, 'camera/image_raw', self.callback, 10)
         self.subscription
         self.sensitivity = 20
 
         
     def callback(self, data):
-        self.get_logger().info("ColourIdentifier callback called.")
         cvBridge = CvBridge()
         try: 
                 image = cvBridge.imgmsg_to_cv2(data, "bgr8")
@@ -56,7 +54,7 @@ class colourIdentifier(Node):
         rgb_mask= cv2.bitwise_or(rb_mask,   green_mask)
 
         # filtered_image = cv2.bitwise_and(image, image, mask=rgb_mask)
-        filtered_image = image
+        filtered_image = hsv_image
         cv2.namedWindow("camera feed", cv2.WINDOW_NORMAL)
         cv2.imshow("camera feed", filtered_image)
         cv2.resizeWindow("camera feed", 320, 240)
@@ -83,15 +81,6 @@ class GoToPose(Node):
         self.action_client.wait_for_server()
         self.send_goal_future = self.action_client.send_goal_async(goal_msg, feedback_callback=self.feedback_callback)
         self.send_goal_future.add_done_callback(self.goal_response_callback)
-
-    def search(self):
-        # Start by making random moves within bounds of the room
-        # (7.28, 5.42), (8.78, -13.1), (-9.54, -14.7), (-11.1, 3.89)
-        while True:
-            randx = round(random.uniform(-9.54, 7.28), 2)
-            randy = round(random.uniform(-13.1, 3.89), 2)
-            self.send_goal(randx, randy, 0.0)
-            time.sleep(20)
 
 
     def goal_response_callback(self, future):
@@ -137,11 +126,14 @@ def main():
     executor = MultiThreadedExecutor()
     executor.add_node(cI)
     executor.add_node(mover)
+    signal.signal(signal.SIGINT, signal_handler)
     executorThread = threading.Thread(target=executor.spin, daemon=True)
     executorThread.start()
 
+    # randx = random.randint(-5.0, 5.0)
+    # randy = random.randint(-5.0, 5.0)
     time.sleep(1)
-    mover.search()
+    mover.send_goal(-5.0, -5.0, 0.0)
 
     try:
         while rclpy.ok():

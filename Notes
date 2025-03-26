@@ -1,0 +1,8 @@
+to open the gazebo world, type:
+ros2 launch turtlebot3_gazebo turtlebot3_task_world_2025.launch.py
+
+to launch rvis
+ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True map:=$HOME/ros2_ws/src/ros2_project_sc21e2k/map/map.yaml
+
+to launch first_steps.py
+ros2 run ros2_project_sc21e2k first_step

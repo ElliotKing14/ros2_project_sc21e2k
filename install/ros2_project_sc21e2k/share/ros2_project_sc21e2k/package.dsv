@@ -1,0 +1,6 @@
+source;share/ros2_project_sc21e2k/hook/pythonpath.ps1
+source;share/ros2_project_sc21e2k/hook/pythonpath.dsv
+source;share/ros2_project_sc21e2k/hook/pythonpath.sh
+source;share/ros2_project_sc21e2k/hook/ament_prefix_path.ps1
+source;share/ros2_project_sc21e2k/hook/ament_prefix_path.dsv
+source;share/ros2_project_sc21e2k/hook/ament_prefix_path.sh
