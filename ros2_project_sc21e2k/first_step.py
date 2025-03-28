@@ -16,7 +16,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.exceptions import ROSInterruptException
-from math import sin, cos
+from math import sin, cos, atan2
 
 
 class colourIdentifier(Node):
@@ -28,7 +28,8 @@ class colourIdentifier(Node):
         self.sensitivity = 20
         self.foundTarget = stop
         self.lastCheck = time.time()
-        self.CHECK_PERIOD = 1.0
+        self.CHECK_PERIOD = 0.1
+        self.rate = self.create_rate(10)
 
         
     def callback(self, data):
@@ -70,23 +71,40 @@ class colourIdentifier(Node):
 
 
     def isTarget(self, image, mask):
+        ONE_METER_THRESHOLD = 150000
         contours, _ = cv2.findContours(mask, mode=cv2.RETR_TREE, method=cv2.CHAIN_APPROX_SIMPLE)
+
         if (contours is not None and len(contours) > 0):
             self.get_logger().info("FOUND TARGET")
+
             largest = max(contours, key=cv2.contourArea)
-            if (cv2.contourArea(largest) > 500):
+            area = cv2.contourArea(largest)
+            self.get_logger().info(f"AREA: {area}")
+            if (area > 500):
                 moment = cv2.moments(largest)
                 if (moment["m00"] != 0):
                     centerx = moment["m10"] / moment["m00"]
                     centery = moment["m01"] / moment["m00"]
+                    centerView = image.shape[1] // 2
+
                     goalMessage = Twist()
-                    goalMessage.linear.x = 0.2
-                    goalMessage.angular.z = 0.0
-                    self.get_logger().info("Publishing target")
+                    if (area <= ONE_METER_THRESHOLD):
+                        goalMessage.linear.x = 0.2
+                        goalMessage.angular.z = (1 - (centerx/centerView)) * 0.2
+                    else:
+                        goalMessage.linear.x = 0.0
+                        goalMessage.angular.z = 0.0
+                    self.get_logger().info(f"Publishing movement:  Linear = {goalMessage.linear.x}   Angular = {goalMessage.angular.z}")
                     self.publisher.publish(goalMessage)
                 
             self.foundTarget[0] = True
             return 1
+
+        elif (self.foundTarget[0] == True):
+            goalMessage = Twist()
+            goalMessage.angular.z = 0.2
+            self.publisher.publish(goalMessage)
+            return 0
         return 0
 
 
@@ -102,6 +120,7 @@ class GoToPose(Node):
         self.currentOrientation = None
         self.goalHandler        = None
         self.lastGoalUpdate     = time.time()
+        self.rate = self.create_rate(10)
 
     def send_goal(self, x, y, yaw):
         self.get_logger().info(f"Sending goal: x = {x}, y = {y}, yaw = {yaw}")
@@ -120,9 +139,11 @@ class GoToPose(Node):
 
     def cancel_goal(self):
         if (self.goalHandler is not None):
-            cancelFuture = self.goalHandler.cancel_goal_async()
-            rclpy.spin_until_future_complete(self, cancelFuture)
+            self.get_logger().info("CANCELLING GOAL")
+            cancel = self.goalHandler.cancel_goal_async()
+            rclpy.spin_until_future_complete(self, cancel)
             self.goalHandler = None
+            time.sleep(0.5)
 
     def search(self):
         # Start by making random moves within bounds of the room - (7.28, 5.42), (8.78, -13.1), (-9.54, -14.7), (-11.1, 3.89)
@@ -131,36 +152,39 @@ class GoToPose(Node):
         while not self.foundTarget[0]:
             randx = round(random.uniform(-9.54, 7.28), 2)
             randy = round(random.uniform(-13.1, 3.89), 2)
-            self.send_goal(randx, randy, 0.0)
+            randz = round(random.uniform( 0.0 ,360.0), 2)
+            self.send_goal(randx, randy, randz)
             time.sleep(TARGET_DETECTION_RATE * 2)
             for i in range(0, int(SEARCH_TIME/TARGET_DETECTION_RATE)-2):
                 if (self.currentPosition is not None):
                     self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
                 if (self.foundTarget[0] and self.currentPosition is not None):
                     self.get_logger().info("CALLING CANCEL GOAL")
-                    # self.cancel_goal()
+                    self.cancel_goal()
                     break
                 else: time.sleep(TARGET_DETECTION_RATE)
-        self.get_logger().info("Stopped due to finding target")
+        # self.get_logger().info("Stopped due to finding target")
 
 
     def moveToTarget(self, data):
         if (self.currentPosition is not None and data.linear is not None and self.foundTarget[0]):
-            self.get_logger().info("Moving Towards Target")
             dt = time.time() - self.lastGoalUpdate
-            if (dt > 2):
+            if (dt > 5):
+                self.get_logger().info("Moving Towards Target")
                 self.lastGoalUpdate = time.time()
 
                 linearVelocity = data.linear.x
                 angularVelocity = data.angular.z
-                dx = linearVelocity * cos(self.currentPosition.z) * dt
-                dy = linearVelocity * sin(self.currentPosition.z) * dt
+                yaw = 2*atan2(self.currentOrientation.z, self.currentOrientation.w)
+                dx = linearVelocity * cos(yaw) * dt
+                dy = linearVelocity * sin(yaw) * dt
                 dTheta = angularVelocity * dt
-                self.send_goal(self.currentPosition.x + dx, self.currentPosition.y + dy, self.currentPosition.z + dTheta)
+                # self.send_goal(self.currentPosition.x + dx, self.currentPosition.y + dy, yaw + dTheta)
 
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
+        self.get_logger().info("DEBUG: GoalHandler initialized")
         self.goalHandler = goal_handle
 
         if not goal_handle.accepted:
