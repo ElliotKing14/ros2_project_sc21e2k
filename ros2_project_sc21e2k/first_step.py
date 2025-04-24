@@ -20,16 +20,20 @@ from math import sin, cos, atan2
 
 
 class colourIdentifier(Node):
-    def __init__(self, stop):
+    def __init__(self, stop, goal):
         super().__init__('cI')
         self.get_logger().info("ColourIdentifier node initialized.")
         self.subscription = self.create_subscription(Image, 'camera/image_raw', self.callback, 10)
         self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sensitivity = 20
         self.foundTarget = stop
-        self.lastCheck = time.time()
-        self.CHECK_PERIOD = 0.1
+        self.goalReached = goal
+        # self.lastCheck = time.time()
+        # self.CHECK_PERIOD = 0.1
         self.rate = self.create_rate(10)
+        self.publish_rate = 0.25
+        self.last_publish = time.time()
+        self.lastTwist = None
 
         
     def callback(self, data):
@@ -58,15 +62,34 @@ class colourIdentifier(Node):
         bg_mask  = cv2.bitwise_or(blue_mask, green_mask)
         rgb_mask = cv2.bitwise_or(rb_mask  , green_mask)
 
-        # filtered_image = cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask))
+        # cv2.namedWindow("camera feed", cv2.WINDOW_NORMAL)
         filtered_image = image
         cv2.namedWindow("camera feed", cv2.WINDOW_NORMAL)
         cv2.imshow("camera feed", filtered_image)
         cv2.resizeWindow("camera feed", 320, 240)
         cv2.waitKey(3)
 
-        if (time.time() - self.lastCheck > self.CHECK_PERIOD):
-            self.lastCheck = time.time()
+        cv2.namedWindow("blue camera feed", cv2.WINDOW_NORMAL)
+        blue_filtered_image = cv2.bitwise_and(image, image, mask=blue_mask)
+        cv2.imshow("blue camera feed", blue_filtered_image)
+        cv2.resizeWindow("blue camera feed", 320, 240)
+        cv2.waitKey(3)
+
+        cv2.namedWindow("red camera feed", cv2.WINDOW_NORMAL)
+        red_filtered_image = cv2.bitwise_and(image, image, mask=red_mask)
+        cv2.imshow("red camera feed", red_filtered_image)
+        cv2.resizeWindow("red camera feed", 320, 240)
+        cv2.waitKey(3)
+
+        cv2.namedWindow("green camera feed", cv2.WINDOW_NORMAL)
+        green_filtered_image = cv2.bitwise_and(image, image, mask=green_mask)
+        cv2.imshow("green camera feed", green_filtered_image)
+        cv2.resizeWindow("green camera feed", 320, 240)
+        cv2.waitKey(3)
+
+        # if (time.time() - self.lastCheck > self.CHECK_PERIOD):
+        #     self.lastCheck = time.time()
+        if (not self.goalReached[0]):
             self.isTarget(cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask)), cv2.bitwise_or(blue_mask, blue_mask))
 
 
@@ -75,11 +98,14 @@ class colourIdentifier(Node):
         contours, _ = cv2.findContours(mask, mode=cv2.RETR_TREE, method=cv2.CHAIN_APPROX_SIMPLE)
 
         if (contours is not None and len(contours) > 0):
-            self.get_logger().info("FOUND TARGET")
+            if (not self.foundTarget[0]):
+                self.get_logger().info("FOUND TARGET")
+                self.foundTarget[0] = True
 
+            # if (time.time() - self.last_publish >= self.publish_rate):
             largest = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(largest)
-            self.get_logger().info(f"AREA: {area}")
+            # self.get_logger().info(f"AREA: {area}")
             if (area > 500):
                 moment = cv2.moments(largest)
                 if (moment["m00"] != 0):
@@ -94,14 +120,18 @@ class colourIdentifier(Node):
                     else:
                         goalMessage.linear.x = 0.0
                         goalMessage.angular.z = 0.0
-                    self.get_logger().info(f"Publishing movement:  Linear = {goalMessage.linear.x}   Angular = {goalMessage.angular.z}")
-                    self.publisher.publish(goalMessage)
-                
-            self.foundTarget[0] = True
-            return 1
+                        self.goalReached[0] = True
+                        self.get_logger().info("TARGET REACHED")
+                    if (self.lastTwist is None or goalMessage.linear.x != self.lastTwist.linear.x or goalMessage.angular.z != self.lastTwist.angular.z):
+                        # self.get_logger().info(f"Publishing movement:  Linear = {goalMessage.linear.x}   Angular = {goalMessage.angular.z}")
+                        self.publisher.publish(goalMessage)
+                        self.lastTwist = goalMessage
+                        self.last_publish = time.time()
+                return 1
 
-        elif (self.foundTarget[0] == True):
+        elif (self.foundTarget[0] and not self.goalReached):
             goalMessage = Twist()
+            goalMessage.linear.x = 0.0
             goalMessage.angular.z = 0.2
             self.publisher.publish(goalMessage)
             return 0
@@ -110,12 +140,13 @@ class colourIdentifier(Node):
 
 
 class GoToPose(Node):
-    def __init__(self, foundTarget):
+    def __init__(self, foundTarget, goalReached):
         super().__init__('navigation_goal_action_client')
         self.get_logger().info("GoToPose node initialized.")
         self.action_client      = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.subscriber         = self.create_subscription(Twist, '/cmd_vel', self.moveToTarget, 10)
         self.foundTarget        = foundTarget
+        self.goalReached        = goalReached
         self.currentPosition    = None
         self.currentOrientation = None
         self.goalHandler        = None
@@ -145,31 +176,49 @@ class GoToPose(Node):
             self.goalHandler = None
             time.sleep(0.5)
 
-    def search(self):
-        # Start by making random moves within bounds of the room - (7.28, 5.42), (8.78, -13.1), (-9.54, -14.7), (-11.1, 3.89)
-        SEARCH_TIME = 30
+    def search(self, poses):
+        # Implementation of random movement
+        SEARCH_TIME = 25
         TARGET_DETECTION_RATE = 0.05
-        while not self.foundTarget[0]:
-            randx = round(random.uniform(-9.54, 7.28), 2)
-            randy = round(random.uniform(-13.1, 3.89), 2)
-            randz = round(random.uniform( 0.0 ,360.0), 2)
-            self.send_goal(randx, randy, randz)
-            time.sleep(TARGET_DETECTION_RATE * 2)
-            for i in range(0, int(SEARCH_TIME/TARGET_DETECTION_RATE)-2):
-                if (self.currentPosition is not None):
-                    self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
-                if (self.foundTarget[0] and self.currentPosition is not None):
-                    self.get_logger().info("CALLING CANCEL GOAL")
-                    self.cancel_goal()
-                    break
-                else: time.sleep(TARGET_DETECTION_RATE)
-        # self.get_logger().info("Stopped due to finding target")
+        if (poses is None):
+            # Start by making random moves within bounds of the room - (7.28, 5.42), (8.78, -13.1), (-9.54, -14.7), (-11.1, 3.89)
+            while not self.foundTarget[0]:
+                randx = round(random.uniform(-9.54, 7.28), 2)
+                randy = round(random.uniform(-13.1, 3.89), 2)
+                randz = round(random.uniform( 0.0 ,360.0), 2)
+                if (not self.foundTarget[0]): self.send_goal(randx, randy, randz)
+                time.sleep(TARGET_DETECTION_RATE * 2)
+                for i in range(0, int(SEARCH_TIME/TARGET_DETECTION_RATE)-2):
+                    if (self.currentPosition is not None):
+                        self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
+                    if (self.foundTarget[0] and self.currentPosition is not None):
+                        self.get_logger().info("CALLING CANCEL GOAL")
+                        self.cancel_goal()
+                        break
+                    else: time.sleep(TARGET_DETECTION_RATE)
+            # self.get_logger().info("Stopped due to finding target")
+        
+        # Implementation of fixed target movement
+        else:
+            for pose in poses:
+                if (not self.foundTarget[0]):
+                    x, y, z, SEARCH_TIME = pose[0], pose[1], pose[2], pose[3]
+                    if (not self.foundTarget[0]): self.send_goal(x, y, z)
+                    time.sleep(TARGET_DETECTION_RATE * 2)
+                    for i in range(0, int(SEARCH_TIME/TARGET_DETECTION_RATE)-2):
+                        if (self.currentPosition is not None):
+                            self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
+                        if (self.foundTarget[0] and self.currentPosition is not None):
+                            self.get_logger().info("CALLING CANCEL GOAL")
+                            self.cancel_goal()
+                            break
+                        else: time.sleep(TARGET_DETECTION_RATE)
 
 
     def moveToTarget(self, data):
-        if (self.currentPosition is not None and data.linear is not None and self.foundTarget[0]):
+        if (self.currentPosition is not None and data.linear is not None and self.foundTarget[0] and not self.goalReached[0]):
             dt = time.time() - self.lastGoalUpdate
-            if (dt > 5):
+            if (dt > 1):
                 self.get_logger().info("Moving Towards Target")
                 self.lastGoalUpdate = time.time()
 
@@ -198,7 +247,7 @@ class GoToPose(Node):
     def get_result_callback(self, future):
         result = future.result().result
         self.get_logger().info(f'Navigation result: {result}')
-        self.goalHandler = None
+        # self.goalHandler = None
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
@@ -226,9 +275,9 @@ def main():
     rclpy.init(args=None)
 
     # In a list so that python treats it as a reference between classes (so one can change the value in the other)
-    foundTarget = [False]   
-    cI = colourIdentifier(foundTarget)
-    mover = GoToPose(foundTarget)
+    foundTarget, goalReached = [False], [False]   
+    cI = colourIdentifier(foundTarget, goalReached)
+    mover = GoToPose(foundTarget, goalReached)
 
     signal.signal(signal.SIGINT, signal_handler)
     executor = MultiThreadedExecutor()
@@ -238,7 +287,7 @@ def main():
     executorThread.start()
 
     time.sleep(1)
-    mover.search()
+    mover.search([(-2.0,-6.0,0.0, 25.0), (-5.0,-2.0,0.0, 5.0), (3.0,-7.0,0.0,28.0), (1.0,-8.5,0.0,5.0)])
 
     try:
         while rclpy.ok():

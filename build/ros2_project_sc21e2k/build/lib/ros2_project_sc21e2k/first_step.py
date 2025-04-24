@@ -16,7 +16,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.exceptions import ROSInterruptException
-from math import sin, cos
+from math import sin, cos, atan2
 
 
 class colourIdentifier(Node):
@@ -24,9 +24,12 @@ class colourIdentifier(Node):
         super().__init__('cI')
         self.get_logger().info("ColourIdentifier node initialized.")
         self.subscription = self.create_subscription(Image, 'camera/image_raw', self.callback, 10)
-        self.publisher = self.create_publisher(PoseStamped, 'move_base_simple/goal', 10)
+        self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sensitivity = 20
         self.foundTarget = stop
+        self.lastCheck = time.time()
+        self.CHECK_PERIOD = 0.1
+        self.rate = self.create_rate(10)
 
         
     def callback(self, data):
@@ -55,34 +58,54 @@ class colourIdentifier(Node):
         bg_mask  = cv2.bitwise_or(blue_mask, green_mask)
         rgb_mask = cv2.bitwise_or(rb_mask  , green_mask)
 
-        # filtered_image = cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask))
+        blue_filtered_image = cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask))
         filtered_image = image
         cv2.namedWindow("camera feed", cv2.WINDOW_NORMAL)
+        horizontal_layout = np.concatenate((filtered_image, blue_filtered_image), axis=1)
         cv2.imshow("camera feed", filtered_image)
-        cv2.resizeWindow("camera feed", 320, 240)
-        cv2.waitKey(3)
+        # cv2.resizeWindow("camera feed", 320, 240)
+        cv2.waitKey(0)
 
-        self.isTarget(cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask)), cv2.bitwise_or(blue_mask, blue_mask))
+        if (time.time() - self.lastCheck > self.CHECK_PERIOD):
+            self.lastCheck = time.time()
+            self.isTarget(cv2.bitwise_and(image, image, mask=cv2.bitwise_or(blue_mask, blue_mask)), cv2.bitwise_or(blue_mask, blue_mask))
 
 
     def isTarget(self, image, mask):
+        ONE_METER_THRESHOLD = 150000
         contours, _ = cv2.findContours(mask, mode=cv2.RETR_TREE, method=cv2.CHAIN_APPROX_SIMPLE)
+
         if (contours is not None and len(contours) > 0):
-            self.get_logger().info("FOUND TARGET HERE")
+            self.get_logger().info("FOUND TARGET")
+
             largest = max(contours, key=cv2.contourArea)
-            if (cv2.contourArea(largest) > 500):
+            area = cv2.contourArea(largest)
+            self.get_logger().info(f"AREA: {area}")
+            if (area > 500):
                 moment = cv2.moments(largest)
                 if (moment["m00"] != 0):
-                    centerx = int(moment["m10"] / moment["m00"])
-                    centery = int(moment["m01"] / moment["m00"])
-                    goalMessage = PoseStamped()
-                    goalMessage.pose.position.x = centerx
-                    goalMessage.pose.position.y = centery
-                    goalMessage.pose.orientation.w = 1.0
+                    centerx = moment["m10"] / moment["m00"]
+                    centery = moment["m01"] / moment["m00"]
+                    centerView = image.shape[1] // 2
+
+                    goalMessage = Twist()
+                    if (area <= ONE_METER_THRESHOLD):
+                        goalMessage.linear.x = 0.2
+                        goalMessage.angular.z = (1 - (centerx/centerView)) * 0.2
+                    else:
+                        goalMessage.linear.x = 0.0
+                        goalMessage.angular.z = 0.0
+                    self.get_logger().info(f"Publishing movement:  Linear = {goalMessage.linear.x}   Angular = {goalMessage.angular.z}")
                     self.publisher.publish(goalMessage)
                 
             self.foundTarget[0] = True
             return 1
+
+        elif (self.foundTarget[0] == True):
+            goalMessage = Twist()
+            goalMessage.angular.z = 0.2
+            self.publisher.publish(goalMessage)
+            return 0
         return 0
 
 
@@ -91,11 +114,14 @@ class GoToPose(Node):
     def __init__(self, foundTarget):
         super().__init__('navigation_goal_action_client')
         self.get_logger().info("GoToPose node initialized.")
-        self.action_client   = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        self.subscriber      = self.create_subscription(PoseStamped, 'move_base_simple/goal', self.moveToTarget, 10)
-        self.foundTarget     = foundTarget
-        self.currentPosition = None
-        self.goalHandler     = None
+        self.action_client      = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.subscriber         = self.create_subscription(Twist, '/cmd_vel', self.moveToTarget, 10)
+        self.foundTarget        = foundTarget
+        self.currentPosition    = None
+        self.currentOrientation = None
+        self.goalHandler        = None
+        self.lastGoalUpdate     = time.time()
+        self.rate = self.create_rate(10)
 
     def send_goal(self, x, y, yaw):
         self.get_logger().info(f"Sending goal: x = {x}, y = {y}, yaw = {yaw}")
@@ -114,9 +140,11 @@ class GoToPose(Node):
 
     def cancel_goal(self):
         if (self.goalHandler is not None):
-            cancelFuture = self.goalHandler.cancel_goal_async()
-            rclpy.spin_until_future_complete(self, cancelFuture)
+            self.get_logger().info("CANCELLING GOAL")
+            cancel = self.goalHandler.cancel_goal_async()
+            rclpy.spin_until_future_complete(self, cancel)
             self.goalHandler = None
+            time.sleep(0.5)
 
     def search(self):
         # Start by making random moves within bounds of the room - (7.28, 5.42), (8.78, -13.1), (-9.54, -14.7), (-11.1, 3.89)
@@ -125,24 +153,39 @@ class GoToPose(Node):
         while not self.foundTarget[0]:
             randx = round(random.uniform(-9.54, 7.28), 2)
             randy = round(random.uniform(-13.1, 3.89), 2)
-            self.send_goal(randx, randy, 0.0)
+            randz = round(random.uniform( 0.0 ,360.0), 2)
+            self.send_goal(randx, randy, randz)
             time.sleep(TARGET_DETECTION_RATE * 2)
             for i in range(0, int(SEARCH_TIME/TARGET_DETECTION_RATE)-2):
-                self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
+                if (self.currentPosition is not None):
+                    self.get_logger().info(f"FOUND TARGET: {self.foundTarget[0]}   CURRENT x: {self.currentPosition.x}   CURRENT y: {self.currentPosition.y}")
                 if (self.foundTarget[0] and self.currentPosition is not None):
                     self.get_logger().info("CALLING CANCEL GOAL")
                     self.cancel_goal()
                     break
                 else: time.sleep(TARGET_DETECTION_RATE)
-        self.get_logger().info("Stopped due to finding target")
+        # self.get_logger().info("Stopped due to finding target")
 
 
     def moveToTarget(self, data):
-        self.get_logger().info(data)
+        if (self.currentPosition is not None and data.linear is not None and self.foundTarget[0]):
+            dt = time.time() - self.lastGoalUpdate
+            if (dt > 5):
+                self.get_logger().info("Moving Towards Target")
+                self.lastGoalUpdate = time.time()
+
+                linearVelocity = data.linear.x
+                angularVelocity = data.angular.z
+                yaw = 2*atan2(self.currentOrientation.z, self.currentOrientation.w)
+                dx = linearVelocity * cos(yaw) * dt
+                dy = linearVelocity * sin(yaw) * dt
+                dTheta = angularVelocity * dt
+                # self.send_goal(self.currentPosition.x + dx, self.currentPosition.y + dy, yaw + dTheta)
 
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
+        self.get_logger().info("DEBUG: GoalHandler initialized")
         self.goalHandler = goal_handle
 
         if not goal_handle.accepted:
@@ -165,6 +208,7 @@ class GoToPose(Node):
         position = current_pose.pose.position
         orientation = current_pose.pose.orientation
         self.currentPosition = position
+        self.currentOrientation = orientation
 
         # ## Access other feedback fields
         # navigation_time = feedback_msg.feedback.navigation_time
